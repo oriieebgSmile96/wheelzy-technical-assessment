@@ -58,4 +58,18 @@ public sealed class LookupCache
 
         return value;
     }
+
+    /// <summary>
+    /// Call after the underlying data changes (for example an admin edits the makes list).
+    /// Removes the local copy and the shared Redis copy so other instances reload it.
+    /// </summary>
+    public async Task InvalidateAsync(string key, CancellationToken cancellationToken = default)
+    {
+        _memoryCache.Remove(key);
+
+        if (_distributedCache is not null)
+        {
+            await _distributedCache.RemoveAsync(key, cancellationToken);
+        }
+    }
 }

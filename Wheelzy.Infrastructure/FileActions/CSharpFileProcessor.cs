@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -21,6 +23,9 @@ public sealed class CSharpFileProcessor
         "bin", "obj", ".git", ".vs"
     };
 
+    // A blank line may contain spaces or tabs, so "\n    \n" also counts.
+    private static readonly Regex BlankLinePattern = new(@"\n[ \t]*\n", RegexOptions.Compiled);
+
     public void ProcessFolder(string rootFolder, FileActions actions = FileActions.All)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootFolder);
@@ -31,37 +36,53 @@ public sealed class CSharpFileProcessor
 
         foreach (var filePath in EnumerateCsharpFiles(rootFolder))
         {
-            var original = File.ReadAllText(filePath);
+            string original;
+            Encoding encoding;
+
+            // Keep the file's original encoding (for example UTF-8 with BOM) when writing it back.
+            using (var reader = new StreamReader(filePath, detectEncodingFromByteOrderMarks: true))
+            {
+                original = reader.ReadToEnd();
+                encoding = reader.CurrentEncoding;
+            }
+
             var updated = ApplyActions(original, actions);
             if (!string.Equals(original, updated, StringComparison.Ordinal))
             {
-                File.WriteAllText(filePath, updated);
+                File.WriteAllText(filePath, updated, encoding);
             }
         }
     }
 
     public string ApplyActions(string source, FileActions actions = FileActions.All)
     {
+        ArgumentNullException.ThrowIfNull(source);
+
         var tree = CSharpSyntaxTree.ParseText(source);
         var root = tree.GetRoot();
+        var newLine = DetectNewLine(source);
+
+        // Suffixes run first so "LoadDto" becomes "LoadDTO" and then "LoadDTOAsync".
+        if (actions.HasFlag(FileActions.NormalizeDtoVmSuffixes))
+        {
+            root = NormalizeDtoVmSuffixes(root);
+        }
 
         if (actions.HasFlag(FileActions.RenameAsyncMethods))
         {
             root = RenameAsyncMethodsWithoutSuffix(root);
         }
 
-        if (actions.HasFlag(FileActions.NormalizeDtoVmSuffixes))
-        {
-            root = NormalizeDtoVmSuffixes(root);
-        }
-
         if (actions.HasFlag(FileActions.InsertBlankLinesBetweenMethods))
         {
-            root = InsertBlankLinesBetweenMethods(root);
+            root = InsertBlankLinesBetweenMethods(root, newLine);
         }
 
         return root.ToFullString();
     }
+
+    private static string DetectNewLine(string source) =>
+        source.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
 
     private static IEnumerable<string> EnumerateCsharpFiles(string rootFolder)
     {
@@ -104,13 +125,11 @@ public sealed class CSharpFileProcessor
     }
 
     private static bool NeedsSuffixRewrite(string identifier) =>
-        identifier.EndsWith("Vm", StringComparison.Ordinal)
-        || identifier.EndsWith("Vms", StringComparison.Ordinal)
-        || identifier.EndsWith("Dto", StringComparison.Ordinal)
-        || identifier.EndsWith("Dtos", StringComparison.Ordinal);
+        !string.Equals(RewriteSuffix(identifier), identifier, StringComparison.Ordinal);
 
     private static string RewriteSuffix(string identifier)
     {
+        // Longest suffixes first so "Dtos" is not treated as "Dto" + "s".
         if (identifier.EndsWith("Dtos", StringComparison.Ordinal))
         {
             return identifier[..^4] + "DTOs";
@@ -134,14 +153,14 @@ public sealed class CSharpFileProcessor
         return identifier;
     }
 
-    private static SyntaxNode InsertBlankLinesBetweenMethods(SyntaxNode root)
+    private static SyntaxNode InsertBlankLinesBetweenMethods(SyntaxNode root, string newLine)
     {
         return root.ReplaceNodes(
             root.DescendantNodes().OfType<TypeDeclarationSyntax>(),
-            (_, type) => AddBlankLines(type));
+            (_, type) => AddBlankLines(type, newLine));
     }
 
-    private static TypeDeclarationSyntax AddBlankLines(TypeDeclarationSyntax type)
+    private static TypeDeclarationSyntax AddBlankLines(TypeDeclarationSyntax type, string newLine)
     {
         var members = type.Members;
         if (members.Count < 2)
@@ -151,17 +170,30 @@ public sealed class CSharpFileProcessor
 
         for (var i = 0; i < members.Count - 1; i++)
         {
-            if (members[i] is not MethodDeclarationSyntax || members[i + 1] is not MethodDeclarationSyntax next)
+            if (members[i] is not MethodDeclarationSyntax previous
+                || members[i + 1] is not MethodDeclarationSyntax next)
             {
                 continue;
             }
 
-            if (HasBlankLineBetween(members[i], next))
+            if (HasBlankLineBetween(previous, next))
             {
                 continue;
             }
 
-            members = members.Replace(next, next.WithLeadingTrivia(EnsureBlankLine(next.GetLeadingTrivia())));
+            var previousEndsWithNewLine = previous.GetTrailingTrivia()
+                .Any(trivia => trivia.IsKind(SyntaxKind.EndOfLineTrivia));
+
+            // If the previous method already ends its line, one extra line break makes a blank line.
+            // If both methods are on the same line, two line breaks are needed.
+            var breaksToInsert = previousEndsWithNewLine ? 1 : 2;
+            var leading = next.GetLeadingTrivia();
+            for (var n = 0; n < breaksToInsert; n++)
+            {
+                leading = leading.Insert(0, SyntaxFactory.EndOfLine(newLine));
+            }
+
+            members = members.Replace(next, next.WithLeadingTrivia(leading));
         }
 
         return type.WithMembers(members);
@@ -171,24 +203,6 @@ public sealed class CSharpFileProcessor
     {
         var between = (first.GetTrailingTrivia().ToFullString() + second.GetLeadingTrivia().ToFullString())
             .Replace("\r\n", "\n", StringComparison.Ordinal);
-        return between.Contains("\n\n", StringComparison.Ordinal);
-    }
-
-    private static SyntaxTriviaList EnsureBlankLine(SyntaxTriviaList leading)
-    {
-        var text = leading.ToFullString().Replace("\r\n", "\n");
-        if (text.Contains("\n\n", StringComparison.Ordinal))
-        {
-            return leading;
-        }
-
-        if (leading.Count == 0)
-        {
-            return SyntaxFactory.TriviaList(
-                SyntaxFactory.EndOfLine(Environment.NewLine),
-                SyntaxFactory.EndOfLine(Environment.NewLine));
-        }
-
-        return leading.Insert(0, SyntaxFactory.EndOfLine(Environment.NewLine));
+        return BlankLinePattern.IsMatch(between);
     }
 }

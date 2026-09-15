@@ -2,6 +2,8 @@
 
 Candidate: Orieb
 
+Repository: https://github.com/oriieebgSmile96/wheelzy-technical-assessment
+
 ---
 
 ## Question 1 — Database design, SQL query, Entity Framework
@@ -17,6 +19,8 @@ A customer wants to sell a car. We store the car catalog once (make → model �
 - **CaseQuote** copies the amount onto the case. If the buyer later changes their rate, old cases keep the quoted number. `IsCurrent` marks the chosen quote. A filtered unique index guarantees only one current quote per case. Current is not required to be the highest amount.
 - **CaseStatusType** includes `RequiresStatusDate`. **Picked Up** has that flag set. A trigger rejects a Picked Up row with a null `StatusDate`. Other statuses may leave `StatusDate` null.
 - **CaseStatusHistory** stores every change (who, when) plus `IsCurrent` for the live status.
+
+- Audit columns (`CreatedBy`, `ModifiedOn`, `ModifiedBy`, `IsActive`, `IsDeleted`) exist in SQL for every table whose entity inherits `BaseEntity`, so the EF model and the database match.
 
 Schema: `Wheelzy.Persistence/Sql/01-schema.sql`
 
@@ -52,23 +56,30 @@ Left joins are used so a new case still appears if a current quote or status has
 
 ### Entity Framework
 
-The same shape, projected to `CaseSummaryDto` so EF does not load full graphs:
+The same shape as the SQL (one LEFT JOIN per "current" row), projected to `CaseSummaryDto` so EF only selects the needed columns:
 
 ```csharp
-return dbContext.Cases
-    .AsNoTracking()
-    .Select(c => new CaseSummaryDto
+var query =
+    from saleCase in dbContext.Cases.AsNoTracking()
+    join currentQuote in dbContext.CaseQuotes.Where(q => q.IsCurrent)
+        on saleCase.CaseId equals currentQuote.CaseId into quotes
+    from currentQuote in quotes.DefaultIfEmpty()
+    join currentStatus in dbContext.CaseStatusHistory.Where(s => s.IsCurrent)
+        on saleCase.CaseId equals currentStatus.CaseId into statuses
+    from currentStatus in statuses.DefaultIfEmpty()
+    select new CaseSummaryDto
     {
-        Year = c.Year,
-        Make = c.Submodel.Model.Make.Name,
-        Model = c.Submodel.Model.Name,
-        Submodel = c.Submodel.Name,
-        CurrentBuyerName = c.Quotes.Where(q => q.IsCurrent).Select(q => q.Buyer.Name).FirstOrDefault(),
-        CurrentQuoteAmount = c.Quotes.Where(q => q.IsCurrent).Select(q => (decimal?)q.Amount).FirstOrDefault(),
-        CurrentStatusName = c.StatusHistory.Where(s => s.IsCurrent).Select(s => s.StatusType.Name).FirstOrDefault(),
-        CurrentStatusDate = c.StatusHistory.Where(s => s.IsCurrent).Select(s => s.StatusDate).FirstOrDefault()
-    })
-    .ToListAsync(cancellationToken);
+        Year = saleCase.Year,
+        Make = saleCase.Submodel.Model.Make.Name,
+        Model = saleCase.Submodel.Model.Name,
+        Submodel = saleCase.Submodel.Name,
+        CurrentBuyerName = currentQuote == null ? null : currentQuote.Buyer.Name,
+        CurrentQuoteAmount = currentQuote == null ? (decimal?)null : currentQuote.Amount,
+        CurrentStatusName = currentStatus == null ? null : currentStatus.StatusType.Name,
+        CurrentStatusDate = currentStatus == null ? (DateTime?)null : currentStatus.StatusDate
+    };
+
+return await query.ToListAsync(cancellationToken);
 ```
 
 Code: `Wheelzy.Application/Cases/Queries/GetCaseSummaries/GetCaseSummariesQueryHandler.cs`
@@ -87,7 +98,7 @@ Cache it. Good examples in this domain: makes/models/submodels, zip coverage, st
 - For multiple instances I would keep a short in-memory cache in front of a **distributed cache** (Redis / `IDistributedCache`). Writes update the database, then remove or overwrite the Redis key. Optionally publish an invalidation message so other nodes drop their local copy.
 - If the data is tiny and almost never changes, loading it once at startup and recycling the app (or pushing a refresh signal) is also valid.
 
-Reference helper: `Wheelzy.Infrastructure/Caching/LookupCache.cs`
+Reference helper: `Wheelzy.Infrastructure/Caching/LookupCache.cs` (`GetOrCreateAsync` + `InvalidateAsync`, which clears both the local and the Redis copy).
 
 ---
 
@@ -189,6 +200,12 @@ This stays efficient when every filter is set, when some are set, and when none 
 | b | Identifiers ending in `Vm`, `Vms`, `Dto`, `Dtos` become `VM`, `VMs`, `DTO`, `DTOs`. |
 | c | Consecutive methods in the same type get a blank line between them if one is missing. |
 
+Robustness details:
+
+- Suffixes are fixed before the Async rename, so `LoadDto` becomes `LoadDTOAsync` (not `LoadDtoAsync`).
+- The file's original line endings (CRLF / LF) and encoding (UTF-8 BOM) are kept.
+- A line containing only spaces counts as a blank line; methods written on the same line are split correctly.
+
 Tests in `tests/Wheelzy.Assessment.Tests/CSharpFileProcessorTests.cs` cover:
 
 - async rename without updating references
@@ -196,3 +213,7 @@ Tests in `tests/Wheelzy.Assessment.Tests/CSharpFileProcessorTests.cs` cover:
 - inserting a missing blank line
 - leaving an existing blank line alone
 - processing nested folders with all three actions
+- ignoring `bin` / `obj` folders
+- keeping CRLF line endings and the UTF-8 BOM
+- suffix-then-async ordering, whitespace-only blank lines, same-line methods
+- not touching words where Dto/Vm is not at the end (`DtoMapper`, `VmFactory`)

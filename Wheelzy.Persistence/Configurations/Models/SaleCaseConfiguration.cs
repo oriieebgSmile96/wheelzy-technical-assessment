@@ -11,7 +11,9 @@ internal class SaleCaseConfiguration : IEntityTypeConfiguration<SaleCase>
         builder.ToTable("SaleCase");
         builder.HasKey(x => x.CaseId);
         builder.Property(x => x.ZipCode).HasColumnType("char(5)").IsRequired();
-        builder.Property(x => x.CreatedOn).HasColumnName("CreatedAt");
+        builder.Property(x => x.CreatedOn)
+            .HasColumnName("CreatedAt")
+            .HasDefaultValueSql("SYSUTCDATETIME()");
         builder.Property(x => x.CreatedBy).HasMaxLength(256);
         builder.Property(x => x.ModifiedBy).HasMaxLength(256);
         builder.HasOne(x => x.Submodel)

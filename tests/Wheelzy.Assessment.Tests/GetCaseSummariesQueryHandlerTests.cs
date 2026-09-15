@@ -26,6 +26,33 @@ public sealed class GetCaseSummariesQueryHandlerTests
         Assert.Null(row.CurrentStatusDate);
     }
 
+    [Fact]
+    public async Task Handle_ReturnsCaseWithoutCurrentQuoteOrStatus()
+    {
+        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString())
+            .Options;
+
+        await using var db = new ApplicationDbContext(options);
+        var zip = new ZipCode { Code = "10001" };
+        db.Add(new SaleCase
+        {
+            Year = 2020,
+            Submodel = new CarSubmodel { Name = "LE", Model = new CarModel { Name = "Camry", Make = new CarMake { Name = "Toyota" } } },
+            Zip = zip,
+            ZipCode = zip.Code
+        });
+        await db.SaveChangesAsync();
+
+        var rows = await new GetCaseSummariesQueryHandler(db).Handle(new GetCaseSummariesQuery(), CancellationToken.None);
+
+        var row = Assert.Single(rows);
+        Assert.Equal("Toyota", row.Make);
+        Assert.Null(row.CurrentBuyerName);
+        Assert.Null(row.CurrentQuoteAmount);
+        Assert.Null(row.CurrentStatusName);
+    }
+
     private static ApplicationDbContext CreateDatabase()
     {
         var options = new DbContextOptionsBuilder<ApplicationDbContext>()

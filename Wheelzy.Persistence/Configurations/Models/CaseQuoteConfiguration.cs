@@ -11,7 +11,9 @@ internal class CaseQuoteConfiguration : IEntityTypeConfiguration<CaseQuote>
         builder.ToTable("CaseQuote");
         builder.HasKey(x => x.CaseQuoteId);
         builder.Property(x => x.Amount).HasColumnType("decimal(12,2)");
-        builder.Property(x => x.CreatedOn).HasColumnName("CreatedAt");
+        builder.Property(x => x.CreatedOn)
+            .HasColumnName("CreatedAt")
+            .HasDefaultValueSql("SYSUTCDATETIME()");
         builder.Property(x => x.CreatedBy).HasMaxLength(256);
         builder.Property(x => x.ModifiedBy).HasMaxLength(256);
         builder.HasIndex(x => new { x.CaseId, x.BuyerId }).IsUnique();

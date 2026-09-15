@@ -82,6 +82,11 @@ CREATE TABLE dbo.SaleCase
     SubmodelId  INT NOT NULL,
     ZipCode     CHAR(5) NOT NULL,
     CreatedAt   DATETIME2(0) NOT NULL CONSTRAINT DF_SaleCase_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CreatedBy   NVARCHAR(256) NULL,
+    ModifiedOn  DATETIME2(0) NULL,
+    ModifiedBy  NVARCHAR(256) NULL,
+    IsActive    BIT NOT NULL CONSTRAINT DF_SaleCase_IsActive DEFAULT (1),
+    IsDeleted   BIT NOT NULL CONSTRAINT DF_SaleCase_IsDeleted DEFAULT (0),
     CONSTRAINT CK_SaleCase_Year CHECK (Year BETWEEN 1900 AND 2100),
     CONSTRAINT FK_SaleCase_CarSubmodel FOREIGN KEY (SubmodelId) REFERENCES dbo.CarSubmodel (SubmodelId),
     CONSTRAINT FK_SaleCase_ZipCode FOREIGN KEY (ZipCode) REFERENCES dbo.ZipCode (ZipCode)
@@ -97,6 +102,11 @@ CREATE TABLE dbo.CaseQuote
     Amount      DECIMAL(12,2) NOT NULL,
     IsCurrent   BIT NOT NULL CONSTRAINT DF_CaseQuote_IsCurrent DEFAULT (0),
     CreatedAt   DATETIME2(0) NOT NULL CONSTRAINT DF_CaseQuote_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CreatedBy   NVARCHAR(256) NULL,
+    ModifiedOn  DATETIME2(0) NULL,
+    ModifiedBy  NVARCHAR(256) NULL,
+    IsActive    BIT NOT NULL CONSTRAINT DF_CaseQuote_IsActive DEFAULT (1),
+    IsDeleted   BIT NOT NULL CONSTRAINT DF_CaseQuote_IsDeleted DEFAULT (0),
     CONSTRAINT CK_CaseQuote_Amount CHECK (Amount >= 0),
     CONSTRAINT UQ_CaseQuote_Case_Buyer UNIQUE (CaseId, BuyerId),
     CONSTRAINT FK_CaseQuote_SaleCase FOREIGN KEY (CaseId) REFERENCES dbo.SaleCase (CaseId),
@@ -117,6 +127,13 @@ CREATE TABLE dbo.CaseStatusHistory
     ChangedAt     DATETIME2(0) NOT NULL CONSTRAINT DF_CaseStatusHistory_ChangedAt DEFAULT (SYSUTCDATETIME()),
     -- Mandatory only when the status type requires it (Picked Up). Enforced below.
     StatusDate    DATETIME2(0) NULL,
+    -- Audit columns shared by every BaseEntity (mapped by EF Core).
+    CreatedAt     DATETIME2(0) NOT NULL CONSTRAINT DF_CaseStatusHistory_CreatedAt DEFAULT (SYSUTCDATETIME()),
+    CreatedBy     NVARCHAR(256) NULL,
+    ModifiedOn    DATETIME2(0) NULL,
+    ModifiedBy    NVARCHAR(256) NULL,
+    IsActive      BIT NOT NULL CONSTRAINT DF_CaseStatusHistory_IsActive DEFAULT (1),
+    IsDeleted     BIT NOT NULL CONSTRAINT DF_CaseStatusHistory_IsDeleted DEFAULT (0),
     CONSTRAINT FK_CaseStatusHistory_SaleCase FOREIGN KEY (CaseId) REFERENCES dbo.SaleCase (CaseId),
     CONSTRAINT FK_CaseStatusHistory_CaseStatusType FOREIGN KEY (StatusTypeId) REFERENCES dbo.CaseStatusType (StatusTypeId)
 );
@@ -124,6 +141,10 @@ CREATE TABLE dbo.CaseStatusHistory
 CREATE UNIQUE INDEX UX_CaseStatusHistory_Current
     ON dbo.CaseStatusHistory (CaseId)
     WHERE IsCurrent = 1;
+
+-- Supports reading the full status timeline of a case in order.
+CREATE INDEX IX_CaseStatusHistory_Case_ChangedAt
+    ON dbo.CaseStatusHistory (CaseId, ChangedAt);
 
 GO
 

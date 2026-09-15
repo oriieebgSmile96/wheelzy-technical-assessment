@@ -11,6 +11,10 @@ internal class CaseStatusHistoryConfiguration : IEntityTypeConfiguration<CaseSta
         builder.ToTable("CaseStatusHistory");
         builder.HasKey(x => x.CaseStatusId);
         builder.Property(x => x.ChangedBy).HasMaxLength(256).IsRequired();
+        builder.Property(x => x.CreatedOn)
+            .HasColumnName("CreatedAt")
+            .HasDefaultValueSql("SYSUTCDATETIME()");
+        builder.HasIndex(x => new { x.CaseId, x.ChangedAt });
         builder.Property(x => x.CreatedBy).HasMaxLength(256);
         builder.Property(x => x.ModifiedBy).HasMaxLength(256);
         builder.HasIndex(x => x.CaseId)
