@@ -1,0 +1,12 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+TestResults/
+*.nupkg
+*.trx
+.idea/
+*.DotSettings.user
+make-clean-commit.ps1
+push-public-github.ps1

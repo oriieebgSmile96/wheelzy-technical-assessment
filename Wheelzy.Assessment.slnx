@@ -1,0 +1,7 @@
+<Solution>
+  <Project Path="Wheelzy.Domain/Wheelzy.Domain.csproj" />
+  <Project Path="Wheelzy.Application/Wheelzy.Application.csproj" />
+  <Project Path="Wheelzy.Persistence/Wheelzy.Persistence.csproj" />
+  <Project Path="Wheelzy.Infrastructure/Wheelzy.Infrastructure.csproj" />
+  <Project Path="tests/Wheelzy.Assessment.Tests/Wheelzy.Assessment.Tests.csproj" />
+</Solution>

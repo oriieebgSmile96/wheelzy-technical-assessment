@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Wheelzy Technical Assessment — Answers</title>
+  <style>
+    body { font-family: Calibri, Arial, sans-serif; font-size: 11pt; line-height: 1.35; color: #111; max-width: 820px; margin: 32px auto; }
+    h1 { font-size: 22pt; margin-bottom: 4px; }
+    h2 { font-size: 16pt; margin-top: 28px; border-bottom: 1px solid #ccc; padding-bottom: 4px; }
+    h3 { font-size: 13pt; margin-top: 18px; }
+    pre, code { font-family: Consolas, "Courier New", monospace; font-size: 9.5pt; }
+    pre { background: #f5f5f5; padding: 12px; border: 1px solid #ddd; white-space: pre-wrap; }
+    ul { margin-top: 6px; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { border: 1px solid #ccc; padding: 6px 8px; text-align: left; }
+  </style>
+</head>
+<body>
+  <h1>Wheelzy Technical Assessment — Answers</h1>
+  <p>Candidate: Orieb</p>
+
+  <h2>Question 1 — Database design, SQL query, Entity Framework</h2>
+  <p>A customer wants to sell a car. We store the car catalog once (make → model → submodel), the car’s year and zip on the sale case, buyers who cover zips with a standard quote, one current quote per case, and a status history.</p>
+
+  <h3>Why the tables are split this way</h3>
+  <ul>
+    <li><strong>CarMake / CarModel / CarSubmodel</strong> keep Honda, Civic, and EX as one row each. Many cases can point at the same submodel instead of repeating strings.</li>
+    <li><strong>Year stays on SaleCase.</strong> Year belongs to this specific vehicle, not to the catalog.</li>
+    <li><strong>ZipCode</strong> is its own table so buyers and cases share the same location list.</li>
+    <li><strong>Buyer.QuoteAmount</strong> is the standard offer (Buyer ABC covers 10 zips and pays $500 for each car). <strong>BuyerZipCode</strong> is the coverage list.</li>
+    <li><strong>CaseQuote</strong> copies the amount onto the case. If the buyer later changes their rate, old cases keep the quoted number. <code>IsCurrent</code> marks the chosen quote. A filtered unique index guarantees only one current quote per case. Current is not required to be the highest amount.</li>
+    <li><strong>CaseStatusType</strong> includes <code>RequiresStatusDate</code>. <strong>Picked Up</strong> has that flag set. A trigger rejects a Picked Up row with a null <code>StatusDate</code>. Other statuses may leave <code>StatusDate</code> null.</li>
+    <li><strong>CaseStatusHistory</strong> stores every change (who, when) plus <code>IsCurrent</code> for the live status.</li>
+  </ul>
+  <p>Schema: <code>src/Wheelzy.Assessment/Sql/01-schema.sql</code></p>
+
+  <h3>SQL query</h3>
+  <p>Only the requested columns: car year/make/model/submodel, current buyer name and quote, current status name and status date.</p>
+  <pre>SELECT
+    c.Year,
+    mk.Name AS Make,
+    md.Name AS Model,
+    sm.Name AS Submodel,
+    b.Name AS CurrentBuyerName,
+    q.Amount AS CurrentQuoteAmount,
+    st.Name AS CurrentStatusName,
+    h.StatusDate AS CurrentStatusDate
+FROM dbo.SaleCase AS c
+INNER JOIN dbo.CarSubmodel AS sm ON sm.SubmodelId = c.SubmodelId
+INNER JOIN dbo.CarModel AS md ON md.ModelId = sm.ModelId
+INNER JOIN dbo.CarMake AS mk ON mk.MakeId = md.MakeId
+LEFT JOIN dbo.CaseQuote AS q
+    ON q.CaseId = c.CaseId
+   AND q.IsCurrent = 1
+LEFT JOIN dbo.Buyer AS b ON b.BuyerId = q.BuyerId
+LEFT JOIN dbo.CaseStatusHistory AS h
+    ON h.CaseId = c.CaseId
+   AND h.IsCurrent = 1
+LEFT JOIN dbo.CaseStatusType AS st ON st.StatusTypeId = h.StatusTypeId;</pre>
+  <p>Left joins are used so a new case still appears if a current quote or status has not been set yet.</p>
+
+  <h3>Entity Framework</h3>
+  <p>The same shape, projected to <code>CaseSummaryDto</code> so EF does not load full graphs:</p>
+  <pre>return dbContext.Cases
+    .AsNoTracking()
+    .Select(c => new CaseSummaryDto
+    {
+        Year = c.Year,
+        Make = c.Submodel.Model.Make.Name,
+        Model = c.Submodel.Model.Name,
+        Submodel = c.Submodel.Name,
+        CurrentBuyerName = c.Quotes.Where(q => q.IsCurrent).Select(q => q.Buyer.Name).FirstOrDefault(),
+        CurrentQuoteAmount = c.Quotes.Where(q => q.IsCurrent).Select(q => (decimal?)q.Amount).FirstOrDefault(),
+        CurrentStatusName = c.StatusHistory.Where(s => s.IsCurrent).Select(s => s.StatusType.Name).FirstOrDefault(),
+        CurrentStatusDate = c.StatusHistory.Where(s => s.IsCurrent).Select(s => s.StatusDate).FirstOrDefault()
+    })
+    .ToListAsync(cancellationToken);</pre>
+  <p>Code: <code>src/Wheelzy.Assessment/Question1/CaseQueryService.cs</code></p>
+
+  <h2>Question 2 — Data that rarely changes but is read all the time</h2>
+  <p>Cache it. Good examples in this domain: makes/models/submodels, zip coverage, status types, buyer standard quotes.</p>
+  <p><strong>Single instance:</strong> <code>IMemoryCache</code> (or a static lookup loaded at startup) is enough. Use a sliding or long absolute expiration, and invalidate when an admin updates the lookup.</p>
+  <p><strong>More than one instance: yes, it matters.</strong></p>
+  <ul>
+    <li>In-memory cache is per process. Instance A can hold a stale make list after Instance B updates SQL Server.</li>
+    <li>For multiple instances keep a short in-memory cache in front of a <strong>distributed cache</strong> (Redis / <code>IDistributedCache</code>). Writes update the database, then remove or overwrite the Redis key. Optionally publish an invalidation message so other nodes drop their local copy.</li>
+    <li>If the data is tiny and almost never changes, loading it once at startup and recycling the app (or pushing a refresh signal) is also valid.</li>
+  </ul>
+  <p>Reference helper: <code>src/Wheelzy.Assessment/Question2/LookupCache.cs</code></p>
+
+  <h2>Question 3 — UpdateCustomersBalanceByInvoices</h2>
+  <p>Original method problems:</p>
+  <ol>
+    <li><code>SingleOrDefault(invoice.CustomerId.Value)</code> is not a predicate, so it does not compile. It should be <code>c =&gt; c.Id == invoice.CustomerId</code>.</li>
+    <li>One query per invoice (N+1).</li>
+    <li><code>SaveChanges()</code> inside the loop = one transaction per invoice.</li>
+    <li>Missing customer becomes a <code>NullReferenceException</code>.</li>
+    <li><code>CustomerId.Value</code> throws if <code>CustomerId</code> is null.</li>
+    <li>Two invoices for the same customer should sum, not apply one at a time with extra round-trips.</li>
+  </ol>
+  <p>Rewritten approach: ignore null/empty invoice lists and invoices with no customer; group totals by customer id; load those customers in one query; subtract the grouped total; call <code>SaveChanges</code> once.</p>
+  <pre>public async Task UpdateCustomersBalanceByInvoicesAsync(
+    IReadOnlyCollection&lt;Invoice&gt; invoices,
+    CancellationToken cancellationToken = default)
+{
+    ArgumentNullException.ThrowIfNull(invoices);
+    if (invoices.Count == 0) return;
+
+    var totalsByCustomer = invoices
+        .Where(invoice =&gt; invoice.CustomerId.HasValue)
+        .GroupBy(invoice =&gt; invoice.CustomerId!.Value)
+        .ToDictionary(group =&gt; group.Key, group =&gt; group.Sum(invoice =&gt; invoice.Total));
+
+    if (totalsByCustomer.Count == 0) return;
+
+    var customerIds = totalsByCustomer.Keys.ToList();
+    var customers = await dbContext.Customers
+        .Where(customer =&gt; customerIds.Contains(customer.Id))
+        .ToListAsync(cancellationToken);
+
+    foreach (var customer in customers)
+        customer.Balance -= totalsByCustomer[customer.Id];
+
+    await dbContext.SaveChangesAsync(cancellationToken);
+}</pre>
+
+  <h2>Question 4 — GetOrders with optional filters</h2>
+  <p>Keep one <code>IQueryable&lt;Order&gt;</code> and add a <code>Where</code> only when that filter is set. Null or empty id lists mean “do not filter by that field.”</p>
+  <pre>public async Task&lt;List&lt;OrderDTO&gt;&gt; GetOrders(
+    DateTime? dateFrom, DateTime? dateTo,
+    List&lt;int&gt; customerIds, List&lt;int&gt; statusIds, bool? isActive)
+{
+    IQueryable&lt;Order&gt; query = dbContext.Orders.AsNoTracking();
+
+    if (dateFrom.HasValue)
+        query = query.Where(o =&gt; o.OrderDate &gt;= dateFrom.Value);
+    if (dateTo.HasValue)
+        query = query.Where(o =&gt; o.OrderDate &lt;= dateTo.Value);
+    if (customerIds is { Count: &gt; 0 })
+        query = query.Where(o =&gt; customerIds.Contains(o.CustomerId));
+    if (statusIds is { Count: &gt; 0 })
+        query = query.Where(o =&gt; statusIds.Contains(o.StatusId));
+    if (isActive.HasValue)
+        query = query.Where(o =&gt; o.IsActive == isActive.Value);
+
+    return await query
+        .Select(o =&gt; new OrderDTO
+        {
+            Id = o.Id,
+            Date = o.OrderDate,
+            CustomerId = o.CustomerId,
+            StatusId = o.StatusId,
+            IsActive = o.IsActive,
+            Total = o.Total
+        })
+        .ToListAsync();
+}</pre>
+  <p>Unused filters never appear in the SQL. <code>AsNoTracking</code> plus a DTO projection avoids tracking and extra columns.</p>
+
+  <h2>Question 5 — Process .cs files</h2>
+  <p><code>CSharpFileProcessor</code> walks a folder (and subfolders), skips bin / obj / .git, and uses Roslyn so renames hit real identifiers instead of random text.</p>
+  <table>
+    <tr><th>Action</th><th>Behavior</th></tr>
+    <tr><td>a</td><td>Async methods whose name does not end with Async are renamed. Call sites are left unchanged, as requested.</td></tr>
+    <tr><td>b</td><td>Identifiers ending in Vm, Vms, Dto, Dtos become VM, VMs, DTO, DTOs.</td></tr>
+    <tr><td>c</td><td>Consecutive methods in the same type get a blank line between them if one is missing.</td></tr>
+  </table>
+  <p>Tests in <code>tests/Wheelzy.Assessment.Tests/CSharpFileProcessorTests.cs</code> cover async rename without updating references, DTO/VM suffix rewrites, inserting a missing blank line, leaving an existing blank line alone, and processing nested folders with all three actions.</p>
+</body>
+</html>
